@@ -9,6 +9,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration
+
+
+
 # Initialize MediaPipe Pose
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
@@ -52,7 +56,12 @@ st.title("🧍 Real-Time Posture Monitoring App")
 st.markdown("Monitor your posture live using your webcam. Get real-time feedback and analytics.")
 
 # Webcam Stream
-webrtc_streamer(key="posture", video_processor_factory=PostureProcessor)
+rtc_configuration = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]}
+)
+
+webrtc_streamer(key="posture", video_processor_factory=PostureProcessor, rtc_configuration=rtc_configuration)
+
 
 # Display Log Data
 if os.path.exists("log_data.csv"):
