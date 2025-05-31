@@ -1,105 +1,72 @@
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import av
 import cv2
-import posture_utils as pu
+import numpy as np
+import mediapipe as mp
+from posture_utils import analyze_posture, log_posture
 import pandas as pd
 import matplotlib.pyplot as plt
-import time
 import os
-import base64
 
+# Initialize MediaPipe Pose
+mp_drawing = mp.solutions.drawing_utils
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
+# Create CSV log file if it doesn't exist
+if not os.path.exists("log_data.csv"):
+    pd.DataFrame(columns=["timestamp", "status", "angle", "feedback"]).to_csv("log_data.csv", index=False)
 
+# Define the Video Processor class
+class PostureProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.last_status = ""
 
-st.set_page_config(page_title="Posture Monitor", layout="wide")
-st.title("📹 Real-Time Posture Monitoring")
-st.markdown("Track your body posture and get real-time feedback using AI.")
-
-if "monitoring" not in st.session_state:
-    st.session_state["monitoring"] = False
-
-
-log_path = "log_data.csv"
-monitoring = st.session_state.get("monitoring", False)
-
-# Button logic
-col1, col2 = st.columns([1, 1])
-with col1:
-    if st.button("▶️ Start / Resume Monitoring"):
-        st.session_state.monitoring = True
-with col2:
-    if st.button("⏸️ Pause Monitoring"):
-        st.session_state.monitoring = False
-
-# Load alert sound as base64
-def get_audio_base64(file_path):
-    with open(file_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    return f'<audio autoplay><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>'
-
-if st.session_state.monitoring:
-    cap = cv2.VideoCapture(0)
-    stframe = st.empty()
-    status_box = st.empty()
-
-    last_alert_time = 0
-
-    while st.session_state.monitoring:
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Webcam not found.")
-            break
-
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pu.pose.process(image)
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        image = frame.to_ndarray(format="bgr24")
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_image)
 
         if results.pose_landmarks:
-            pu.mp_drawing.draw_landmarks(image, results.pose_landmarks, pu.mp_pose.POSE_CONNECTIONS)
             landmarks = results.pose_landmarks.landmark
+            status, angle, feedback = analyze_posture(landmarks)
 
-            status, angle, feedback = pu.analyze_posture(landmarks)
-            pu.log_posture(status, angle, feedback, log_path)
+            # Draw landmarks
+            mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
-            # Show feedback
-            color = (0, 255, 0) if status == "Good" else (0, 165, 255) if status == "Alarming" else (0, 0, 255)
-            cv2.putText(image, f"Posture: {status}", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+            # Overlay feedback
+            color = (0, 255, 0) if status == "Good" else (0, 255, 255) if status == "Alarming" else (0, 0, 255)
+            cv2.putText(image, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            for i, tip in enumerate(feedback):
+                cv2.putText(image, tip, (10, 60 + i * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # Trigger alert for danger
-            if status == "Danger" and time.time() - last_alert_time > 20:
-                last_alert_time = time.time()
-                st.markdown(get_audio_base64("alarm.mp3"), unsafe_allow_html=True)
+            # Log posture
+            log_posture(status, angle, feedback)
 
-        stframe.image(image, channels='RGB')
+        return av.VideoFrame.from_ndarray(image, format="bgr24")
 
-        # Feedback box
-        with status_box:
-            st.markdown(f"### Current Status: **{status}**")
-            if feedback:
-                st.warning(" | ".join(feedback))
+# Streamlit UI
+st.set_page_config(page_title="Real-Time Posture Monitor", layout="wide")
+st.title("🧍 Real-Time Posture Monitoring App")
+st.markdown("Monitor your posture live using your webcam. Get real-time feedback and analytics.")
 
-    cap.release()
+# Webcam Stream
+webrtc_streamer(key="posture", video_processor_factory=PostureProcessor)
 
-# Trend summary
-st.subheader("📊 Posture Trend Summary")
-if os.path.exists(log_path):
-    df = pd.read_csv(log_path)
-    counts = df["status"].value_counts().to_dict()
-    total = sum(counts.values()) or 1
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("✅ Good", f"{counts.get('Good', 0)} ({counts.get('Good',0)*100//total}%)")
-    col2.metric("⚠️ Alarming", f"{counts.get('Alarming', 0)} ({counts.get('Alarming',0)*100//total}%)")
-    col3.metric("❌ Danger", f"{counts.get('Danger', 0)} ({counts.get('Danger',0)*100//total}%)")
-
-    # Line chart
+# Display Log Data
+if os.path.exists("log_data.csv"):
+    df = pd.read_csv("log_data.csv")
+    st.subheader("📈 Posture Angle Trend")
     fig, ax = plt.subplots()
-    ax.plot(pd.to_datetime(df["timestamp"]), df["angle"], label="Neck Angle")
-    ax.axhspan(95, 110, color='green', alpha=0.2, label="Good Range")
-    ax.axhspan(110, 130, color='orange', alpha=0.2, label="Alarming Range")
-    ax.axhspan(130, 180, color='red', alpha=0.2, label="Danger Range")
-    ax.legend()
-    ax.set_title("Neck Angle Over Time")
-    ax.set_ylabel("Angle (°)")
+    df["angle"] = pd.to_numeric(df["angle"], errors='coerce')
+    df.dropna(subset=["angle"], inplace=True)
+    ax.plot(df["timestamp"], df["angle"], label="Angle")
+    ax.set_ylabel("Angle (degrees)")
     ax.set_xlabel("Time")
+    ax.tick_params(axis='x', rotation=45)
+    ax.set_title("Posture Angle Over Time")
     st.pyplot(fig)
-else:
-    st.info("No data available. Start monitoring to view trends.")
+
+    st.subheader("📝 Summary")
+    st.write(df.tail(5))
